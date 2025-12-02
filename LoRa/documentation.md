@@ -41,8 +41,7 @@ To minimize airtime and latency, v1.1 uses a compressed **4-Byte Header**.
 
 ### 3.1 Packet Structure Diagram
 
-[Image of Packet Structure Diagram]
-
+![Image of Packet Structure Diagram](./Image/Mini_packet.png)
 ```
 | Byte 0       | Byte 1       | Byte 2          | Byte 3       | Byte 4...N      |
 |--------------|--------------|-----------------|--------------|-----------------|
