@@ -1,196 +1,169 @@
-Here is the detailed technical documentation for **LoRa Mesh System v1.1**. This document provides an in-depth reference for the system architecture, hardware interface, protocol specifications, and code logic.
+# LoRa Mesh Communication System - Technical Manual v1.2
 
-# LoRa Mesh System v1.1 Technical Documentation
+**Project:** LoRa Mesh / Point-to-Point Reliable Link  
+**Version:** 1.2 (Stable - SF12 Optimized)  
+**Date:** December 03, 2025  
+**Platform:** ESP32-S3 + Dual SX1262  
+**Status:** Released
 
-## 1\. System Architecture
+---
 
-**Version:** 1.1 (Point-to-Point LBT Implementation)
-**Hardware Platform:** ESP32-S3 (or compatible) with Dual SX1262 LoRa Modules.
+## 1. Executive Summary
 
-### 1.1 Dual-Radio Design Strategy
+The LoRa Mesh System v1.2 is a robust, long-range communication protocol designed for decentralized networks. Unlike standard LoRa implementations which operate on a "fire-and-forget" basis, v1.2 introduces a **Reliable Transport Layer** modeled after TCP. 
 
-To achieve full-duplex emulation and robust collision avoidance, the system utilizes two separate LoRa modules:
+This version specifically addresses packet loss and collision issues identified in v1.1 by implementing **Selective Repeat ARQ** (Automatic Repeat Request), **Packet Fragmentation**, and **CRC Data Integrity**. It utilizes a unique dual-radio architecture to emulate full-duplex communication, significantly reducing latency and "blind spots" during transmission.
 
-  * **Module 1 (TX / Scanner):** This radio is dedicated exclusively to outgoing traffic. It remains in `STANDBY` mode until a message needs to be sent. Crucially, it performs the **Channel Activity Detection (CAD)** scans required by the Listen Before Talk (LBT) algorithm.
-  * **Module 2 (RX / Listener):** This radio is dedicated exclusively to incoming traffic. It remains in continuous `RX` (Receive) mode. This ensures that the node never misses an incoming packet while processing user input or waiting for a clear channel to transmit.
+**v1.2 Optimization:** This release is specifically tuned for **Spreading Factor 12 (SF12)**, accommodating the extremely long "Time on Air" (ToA) required for maximum range communication.
 
------
+---
 
-## 2\. Hardware Interface
+## 2. System Architecture
 
-The system requires two SX1262 modules connected via separate SPI buses.
+The system is built on a layered architecture, separating the physical transmission handling from the application logic.
 
-### 2.1 Pin Configuration Map (ESP32-S3)
+### 2.1 Logical Layers
 
-| Component | Function | Module 1 (TX) | Module 2 (RX) | Description |
+| Layer | Component | Functionality |
+| :--- | :--- | :--- |
+| **Application** | `User Input / CLI` | Handles text input, display, and command parsing. |
+| **Transport** | `ARQ Manager` | Manages Sequencing, Windowing, Retransmission, and Reassembly. |
+| **Network/Link** | `MiniProtocol` | Packet framing, Addressing (Src/Dst), and CRC generation. |
+| **MAC** | `LBT Algorithm` | Carrier Sense (CAD), Random Backoff, Collision Avoidance. |
+| **PHY** | `SX1262 Driver` | SPI communication, RF modulation (LoRa), Frequency setting. |
+
+### 2.2 Dual-Radio Strategy
+To overcome the half-duplex nature of LoRa radios (cannot listen while transmitting), v1.2 employs two physical modules:
+* **Radio A (TX):** Dedicated to outgoing traffic. It stays in Standby and performs CAD (Channel Activity Detection) before every transmission.
+* **Radio B (RX):** Dedicated to incoming traffic. It remains in continuous RX mode with a maximized timeout window (5000ms+) to capture slow SF12 packets.
+
+---
+
+## 3. Hardware Integration
+
+This section details the physical connection between the MCU (ESP32-S3) and the LoRa modules.
+
+### 3.1 Pin Configuration Table
+
+| Signal | ESP32-S3 Pin | SX1262 Module 1 (TX) | SX1262 Module 2 (RX) | Function |
 | :--- | :--- | :--- | :--- | :--- |
-| **SPI Bus** | Data Transfer | **SPI 1** | **SPI 2** | Separate buses prevent resource locking conflicts. |
-| **SCK** | Serial Clock | GPIO 2 | GPIO 11 | Clock signal for SPI communication. |
-| **MOSI** | Master Out | GPIO 3 | GPIO 10 | Data sent from ESP32 to LoRa. |
-| **MISO** | Master In | GPIO 4 | GPIO 9 | Data sent from LoRa to ESP32. |
-| **CS** | Chip Select | GPIO 1 | GPIO 12 | Active Low signal to select the specific module. |
-| **RST** | Reset | GPIO 5 | GPIO 8 | Hard reset pin for the module. |
-| **DIO1** | IRQ | GPIO 18 | GPIO 13 | Interrupt pin (triggers on RX Done, TX Done, etc.). |
-| **BUSY** | Busy Status | GPIO 6 | GPIO 7 | Indicates module is processing a command. |
+| **MISO** | GPIO 4 | MISO | - | Master In Slave Out (SPI 1) |
+| **MOSI** | GPIO 3 | MOSI | - | Master Out Slave In (SPI 1) |
+| **SCK** | GPIO 2 | SCK | - | Serial Clock (SPI 1) |
+| **NSS/CS** | GPIO 1 | NSS | - | Chip Select (Active Low) |
+| **RST** | GPIO 5 | RST | - | Reset |
+| **DIO1** | GPIO 18 | DIO1 | - | IRQ (TxDone/CadDone) |
+| **BUSY** | GPIO 6 | BUSY | - | Status Line |
+| **MISO** | GPIO 9 | - | MISO | Master In Slave Out (SPI 2) |
+| **MOSI** | GPIO 10 | - | MOSI | Master Out Slave In (SPI 2) |
+| **SCK** | GPIO 11 | - | SCK | Serial Clock (SPI 2) |
+| **NSS/CS** | GPIO 12 | - | NSS | Chip Select |
+| **RST** | GPIO 8 | - | RST | Reset |
+| **DIO1** | GPIO 13 | - | DIO1 | IRQ (RxDone) |
+| **BUSY** | GPIO 7 | - | BUSY | Status Line |
+| **VCC** | 3.3V | VCC | VCC | Power Supply |
+| **GND** | GND | GND | GND | Ground |
 
------
+> **Note:** Ensure a common ground is shared between the ESP32 and both LoRa modules.
 
-## 3\. Protocol Specification: "Mini Algorithm"
+---
 
-To minimize airtime and latency, v1.1 uses a compressed **4-Byte Header**.
+## 4. Protocol Specification (v1.2)
 
-### 3.1 Packet Structure Diagram
+The "Mini Protocol" v1.2 uses a bit-packed binary header to minimize airtime.
 
-![Image of Packet Structure Diagram](./Image/Mini_packet.png)
-```
-| Byte 0       | Byte 1       | Byte 2          | Byte 3       | Byte 4...N      |
-|--------------|--------------|-----------------|--------------|-----------------|
-| TO_ADDR      | FROM_ADDR    | INFO_BYTE       | LEN          | PAYLOAD         |
-| (Target ID)  | (Sender ID)  | (ID + Type)     | (Data Size)  | (Variable Data) |
-```
+### 4.1 Packet Layout
 
-### 3.2 Field Definitions
+**Total Header Size:** 3 Bytes  
+**Total Footer Size:** 2 Bytes  
+**Max Payload:** 50 Bytes  
 
-1.  **`TO_ADDR` (1 Byte):**
+| Byte Offset | 7 | 6 | 5 | 4 | 3 | 2 | 1 | 0 | Description |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
+| **0** | **TO ADDR [3:0]** | **FROM ADDR [3:0]** | Address Byte. 4 bits per address (Max 16 nodes). |
+| **1** | **SEQ NUM [3:0]** | **PKT TYPE [3:0]** | Info Byte. Sequence ID (0-15) and Type Enum. |
+| **2** | **PAYLOAD LENGTH [7:0]** | Length of data payload (0-50). |
+| **3...N** | **PAYLOAD DATA** | Variable length user data. |
+| **N+1** | **CRC16 [15:8]** | High byte of CRC16-CCITT checksum. |
+| **N+2** | **CRC16 [7:0]** | Low byte of CRC16-CCITT checksum. |
 
-      * Range: `0x00` - `0xFE` (Unicast Addresses)
-      * Reserved: `0xFF` (Broadcast - all nodes receive)
-      * *Usage:* Checked by the receiver. If it matches `MY_ADDR` or `0xFF`, the packet is processed.
+### 4.2 Packet Types
+* **`0x01` (TYPE_DATA):** An intermediate fragment of a larger message. Receiver should buffer this.
+* **`0x02` (TYPE_ACK):** Acknowledgment packet. Payload length is 0. Contains the SEQ number being acknowledged.
+* **`0x03` (TYPE_DATA_END):** The final fragment of a message. Triggers reassembly and display on the receiver.
 
-2.  **`FROM_ADDR` (1 Byte):**
+---
 
-      * Range: `0x00` - `0xFE`
-      * *Usage:* Identifies the sender for replies (ACKs) and display.
+## 5. Reliability Layer (ARQ)
 
-3.  **`INFO_BYTE` (1 Byte - Bit Packed):**
+v1.2 implements **Selective Repeat ARQ**. This mechanism allows the sender to transmit multiple packets (the "window") without waiting for individual ACKs, boosting throughput compared to Stop-and-Wait.
 
-      * **High Nibble (Bits 7-4): `MSG_ID`**
-          * A 4-bit rolling counter (`0` to `15`).
-          * Used to detect duplicate packets and match ACKs.
-      * **Low Nibble (Bits 3-0): `PKT_TYPE`**
-          * `0x01` (**DATA**): Contains user message.
-          * `0x02` (**ACK**): Acknowledgment (Payload length 0).
-          * `0x00`, `0x03-0x0F`: Reserved.
+### 5.1 Sender Logic (Sliding Window)
+1.  **Window Size:** Fixed at **4** (optimized for SF12 congestion control).
+2.  **Operation:** The sender maintains a list of sent packets.
+    * If `ACK` for Seq `N` is received: Mark `N` as delivered.
+    * If `ACK` for Seq `N` is NOT received within `TIMEOUT_MS`: Retransmit packet `N`.
+    * **Slide:** If the base of the window (oldest packet) is ACKed, shift the window to `N+1` and transmit the next queued packet.
 
-4.  **`LEN` (1 Byte):**
+### 5.2 Receiver Logic (Reassembly Buffer)
+1.  **In-Order:** If received Seq equals `Expected Seq`:
+    * Append payload to buffer.
+    * Increment `Expected Seq`.
+    * Check "Out-of-Order" buffer for the *next* packet.
+2.  **Out-Of-Order:** If received Seq > `Expected Seq`:
+    * Store packet in `rx_packet_buffer`.
+    * Do NOT display yet.
+    * Send `ACK` (to prevent sender timeout).
+3.  **Completion:** When a packet of type `DATA_END` is processed in order, the buffer is decoded to UTF-8 and printed.
 
-      * Indicates the size of the following Payload.
-      * Maximum: 50 Bytes (Hard limit in `MiniPacket` class).
+---
 
------
+## 6. Medium Access Control (LBT)
 
-## 4\. Module Reference: `mini_protocol.py`
+To prevent packet collisions, especially during ARQ retransmissions, the system uses Listen Before Talk.
 
-### Class: `MiniPacket`
+### 6.1 LBT Algorithm Flowchart
+1.  **Request to Send:** Packet selected for transmission.
+2.  **Desync:** Wait `random(50ms, 200ms)`. *Increased in v1.2 for SF12 compatibility.*
+3.  **CAD Scan:** Radio A checks channel noise floor.
+    * **Busy:** Wait `random(100ms, 300ms)`. Retry (Max 5 times).
+    * **Free:** Transmit immediately.
+4.  **Drop:** If 5 retries fail, abort transmission for this cycle (Sender ARQ will retry later).
 
-#### `__init__(self, to_addr, from_addr, msg_id, pkt_type, payload=b'')`
+---
 
-Initializes a packet object.
+## 7. Configuration Guide
 
-  * **Truncation Logic:** Automatically truncates `payload` to 50 bytes to enforce airtime limits.
-  * **Bit Masking:** Applies `& 0x0F` to `msg_id` and `pkt_type` to ensure they don't overflow into each other's nibbles.
+The following constants in `main.py` dictate system performance. These specific values are tuned for **SF12**.
 
-#### `to_bytes(self) -> bytes`
+| Parameter | Recommended Value | Impact |
+| :--- | :--- | :--- |
+| **`SF`** | 12 | **Spreading Factor.** Longest range, highest immunity to noise, but very slow data rate. |
+| **`TIMEOUT_MS`** | 10000 | **ARQ Timeout.** Set to 10 seconds. Since one packet takes ~2s to fly, the round trip is ~4s-6s. 10s prevents premature retries. |
+| **`WINDOW_SIZE`** | 4 | **ARQ Window.** Kept small to prevent flooding the channel at slow data rates. |
+| **`RX_TIMEOUT`** | 5000 | **Radio Timeout.** Set to 5 seconds. Vital for SF12; ensures the radio doesn't stop listening while a slow packet is still arriving. |
+| **`MY_ADDR`** | 0x00 - 0x0F | **Device ID.** Must be unique. |
 
-Serializes the object for transmission.
+---
 
-  * **Logic:**
-    ```python
-    info_byte = (self.msg_id << 4) | self.pkt_type
-    ```
-    *Shifts the Message ID 4 bits to the left and performs a bitwise OR with the Packet Type to combine them.*
+## 8. Troubleshooting & FAQ
 
-#### `from_bytes(data) -> MiniPacket`
+### Issue: "I see [TX] Success logs but no [RX] logs on the other side."
+* **Cause 1 (SF12):** The packet is taking too long to fly.
+    * *Fix:* Ensure `timeout_ms` in `sx_rx.recv()` is at least 4000-5000ms.
+* **Cause 2 (CRC):** Signal is too weak or colliding.
+    * *Fix:* Check antenna connections. Reduce distance.
+* **Cause 3 (Addressing):** `TARGET_ADDR` on sender does not match `MY_ADDR` on receiver.
 
-Deserializes raw bytes from the radio.
+### Issue: "The system feels very slow."
+* **Explanation:** This is expected behavior for SF12.
+    * Time on Air for 1 packet @ SF12 ≈ 1.5 to 2.0 seconds.
+    * ACK return time ≈ 1.5 to 2.0 seconds.
+    * Total Round Trip ≈ 4.0 seconds per packet.
+* *Optimization:* Switch to SF9 if maximum range (>5km) is not strictly required.
 
-  * **Validation:** Returns `None` if `len(data) < 4` or if the received buffer is shorter than the `LEN` header indicates.
-  * **Unpacking:**
-    ```python
-    msg_id = (info_byte >> 4) & 0x0F
-    pkt_type = info_byte & 0x0F
-    ```
+### Issue: "Channel Congested" or "LBT Busy" logs.
+* **Cause:** With SF12, the airtime is long. If two nodes try to talk, the channel stays "Busy" for seconds at a time.
+* **Fix:** The code handles this via `random(100, 300)` backoff. Do not lower this value, or you will create a collision loop.
 
------
-
-## 5\. Module Reference: `main.py`
-
-### 5.1 Configuration Constants
-
-  * **`MY_ADDR` / `TARGET_ADDR`**: Static addressing for v1.1. Must be swapped on the second device.
-  * **`MAX_LBT_RETRIES` (5)**: Defines how persistent the node is when the channel is busy.
-  * **`INITIAL_BACKOFF_MAX` (32ms)**: The window for the pre-scan delay.
-  * **`RETRY_BACKOFF_MIN/MAX` (50-150ms)**: The window for exponential backoff if a collision is detected.
-
-### 5.2 LoRa Radio Configuration
-
-Both radios are initialized with identical RF parameters to ensure compatibility:
-
-  * **Frequency:** 866 MHz
-  * **Spreading Factor (SF):** 9. *Chosen as a balance between range and "Time on Air". Lower SF allows for faster CAD checks.*
-  * **Bandwidth:** 125 kHz.
-  * **Coding Rate:** 4/7.
-  * **Sync Word:** `0x1424` (Private). *Isolates traffic from other public LoRa networks.*
-
-### 5.3 Algorithm: `lbt_send` (Listen Before Talk)
-
-This function implements the collision avoidance logic defined in the design document.
-
-**Detailed Logic Flow:**
-
-1.  **Serialization:** Converts the `MiniPacket` object to a byte array.
-2.  **Phase 1: Desynchronization**
-      * The system sleeps for `random(0, 32) ms`.
-      * *Purpose:* If two nodes react to an event simultaneously, this random pause ensures they don't scan at the exact same microsecond.
-3.  **Phase 2: Channel Scan Loop**
-      * **Action:** Calls `sx_tx.scanChannel()`.
-      * **Underlying Driver:** The driver sets the radio to CAD mode. It listens for the specific LoRa Preamble.
-      * **Result - Free (`-15`):**
-          * The radio immediately switches to TX mode.
-          * Packet is sent.
-          * Function returns `True`.
-      * **Result - Detected (`-702` or others):**
-          * The channel is considered "Busy".
-          * **Backoff:** The system sleeps for `random(50, 150) ms`.
-          * **Retry:** Increments attempt counter and loops back to Scan.
-4.  **Phase 3: Timeout**
-      * If `attempt > MAX_LBT_RETRIES`, the packet is dropped to prevent the system from hanging indefinitely.
-
-### 5.4 Algorithm: `rx_loop` (Continuous Reception)
-
-This function runs on a dedicated thread to ensure non-blocking operation.
-
-**Detailed Logic Flow:**
-
-1.  **Setup:** Runs in an infinite `while True` loop.
-2.  **Listening:** Calls `sx_rx.recv()` with `timeout_en=True`.
-      * *Note:* A timeout (e.g., 1000ms) is used instead of blocking indefinitely. This allows the thread to check for exit conditions or handle errors gracefully without freezing the SPI bus forever.
-3.  **Parsing:**
-      * On data receipt, it attempts to create a `MiniPacket`.
-      * **Address Check:** It verifies `pkt.to_addr == MY_ADDR` or `0xFF`. Packets for other nodes are ignored (promiscuous mode is off).
-4.  **Output:** Valid messages are decoded (UTF-8) and printed to the serial console.
-
------
-
-## 6\. Usage & Integration
-
-### 6.1 Setup Instructions
-
-1.  **Flash Node A:**
-      * Set `MY_ADDR = 0x0A`
-      * Set `TARGET_ADDR = 0x0B`
-      * Upload `mini_protocol.py` and `main.py`.
-2.  **Flash Node B:**
-      * Set `MY_ADDR = 0x0B`
-      * Set `TARGET_ADDR = 0x0A`
-      * Upload `mini_protocol.py` and `main.py`.
-
-### 6.2 Runtime Operation
-
-1.  Open Serial Monitors for both devices.
-2.  **RX Thread:** You will see `[RX] Listening on Module 2...`.
-3.  **Sending:**
-      * Type a message and press Enter.
-      * Log: `[TX] Attempting to send...` -\> `[TX] Sent`.
-4.  **Collision Simulation:**
-      * If you type on both terminals simultaneously, you may see `[TX] Busy... Backing off...`. This confirms the LBT algorithm is active and working.
+---
