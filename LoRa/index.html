@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TDMA Tactical Node</title>
+    <style>
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            background-color: #121212;
+            color: #00ffcc;
+            margin: 0;
+            padding: 15px;
+        }
+        h2 {
+            text-align: center;
+            border-bottom: 2px solid #00ffcc;
+            padding-bottom: 10px;
+        }
+        .card {
+            background: #1e1e1e;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.5);
+        }
+        .data-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 4px;
+        }
+        .label {
+            color: #aaa;
+            font-weight: bold;
+        }
+        .value {
+            font-weight: bold;
+        }
+        button {
+            width: 100%;
+            padding: 15px;
+            background-color: #00ffcc;
+            color: #121212;
+            border: none;
+            border-radius: 8px;
+            font-size: 18px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+        }
+        button:active {
+            background-color: #00b38f;
+        }
+        #logs {
+            background: #000;
+            color: #00ff00;
+            padding: 10px;
+            height: 200px;
+            overflow-y: scroll;
+            font-size: 12px;
+            border-radius: 4px;
+        }
+        .gps-link {
+            color: #ff9900;
+            text-decoration: none;
+        }
+        ul {
+            list-style-type: square;
+            padding-left: 20px;
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>📡 TDMA MESH DASHBOARD</h2>
+
+    <button id="syncBtn" onclick="syncWithPhone()">📍 Sync Time & GPS</button>
+
+    <div class="card">
+        <div class="data-row"><span class="label">ROLE:</span> <span class="value" id="role">Loading...</span></div>
+        <div class="data-row"><span class="label">SYNC:</span> <span class="value" id="sync">Loading...</span></div>
+        <div class="data-row"><span class="label">PHASE:</span> <span class="value" id="phase">Loading...</span></div>
+        <div class="data-row"><span class="label">SWARM:</span> <span class="value" id="active">Loading...</span></div>
+    </div>
+
+    <div class="card">
+        <span class="label">📍 LIVE NODE LOCATIONS:</span>
+        <div id="locations" style="margin-top: 10px; font-size: 14px; color: #fff;">
+            Waiting for network GPS data...
+        </div>
+    </div>
+
+    <div class="card">
+        <span class="label">TERMINAL LOGS:</span>
+        <div id="logs" style="margin-top: 10px;"></div>
+    </div>
+
+<script>
+        // --- 1. THE SYNC & GPS FUNCTION (WITH MANUAL FALLBACK) ---
+        function syncWithPhone() {
+            const btn = document.getElementById('syncBtn');
+            btn.innerText = "AQUIRING GPS...";
+            
+            const epochTime = Date.now();
+
+            // Helper function to send the data
+            function sendData(lat, lon) {
+                fetch(`/api/set_time?epoch=${epochTime}&lat=${lat}&lon=${lon}`)
+                    .then(response => {
+                        alert(`Armed!\nTime: ${epochTime}\nGPS: ${lat}, ${lon}`);
+                        btn.innerText = "📍 Sync Time & GPS";
+                    })
+                    .catch(err => {
+                        alert("Failed to communicate with Node.");
+                        btn.innerText = "📍 Sync Time & GPS";
+                    });
+            }
+
+            // The Manual Fallback
+            function manualFallback(errorMsg) {
+                const manualCoords = prompt(`${errorMsg}\n\nBrowsers block automatic GPS over HTTP. Please manually enter your Lat, Lon (e.g., 23.5204, 87.3119):`, "0.0000, 0.0000");
+                
+                if (manualCoords !== null) {
+                    const parts = manualCoords.split(',');
+                    const lat = parts[0] ? parseFloat(parts[0].trim()).toFixed(6) : 0.0;
+                    const lon = parts[1] ? parseFloat(parts[1].trim()).toFixed(6) : 0.0;
+                    sendData(lat, lon);
+                } else {
+                    // User clicked cancel
+                    alert("Syncing Time Only.");
+                    sendData(0.0, 0.0);
+                }
+            }
+
+            // Attempt automatic GPS pull
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(
+                    function(position) {
+                        // Success! (Usually only works if you find a way to test on HTTPS or localhost)
+                        sendData(position.coords.latitude.toFixed(6), position.coords.longitude.toFixed(6));
+                    },
+                    function(error) {
+                        // Browser blocked it due to HTTP security
+                        manualFallback("GPS Blocked by Browser Security.");
+                    },
+                    { enableHighAccuracy: true, timeout: 3000 }
+                );
+            } else {
+                manualFallback("Geolocation not supported.");
+            }
+        }
+
+        // --- 2. THE DASHBOARD POLLING FUNCTION ---
+        function updateState() {
+            fetch('/api/state')
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('role').innerText = data.role;
+                document.getElementById('sync').innerText = data.sync;
+                document.getElementById('phase').innerText = data.phase;
+                document.getElementById('active').innerText = data.active.length > 0 ? data.active.join(', ') : "None";
+
+                const locDiv = document.getElementById('locations');
+                if (data.locations && Object.keys(data.locations).length > 0) {
+                    let html = "<ul>";
+                    for (const [addr, coords] of Object.entries(data.locations)) {
+                        const mapsUrl = `http://googleusercontent.com/maps.google.com/?q=${coords.lat},${coords.lon}`;
+                        html += `<li>Node 0x${parseInt(addr).toString(16).toUpperCase()}: <a class="gps-link" href="${mapsUrl}" target="_blank">${coords.lat.toFixed(4)}, ${coords.lon.toFixed(4)}</a></li>`;
+                    }
+                    html += "</ul>";
+                    locDiv.innerHTML = html;
+                } else {
+                    locDiv.innerHTML = "No GPS targets acquired yet.";
+                }
+
+                const logBox = document.getElementById('logs');
+                logBox.innerHTML = data.logs.join('<br>');
+                logBox.scrollTop = logBox.scrollHeight; 
+            })
+            .catch(err => console.error("Polling error:", err));
+        }
+
+        setInterval(updateState, 2000);
+        window.onload = updateState;
+    </script>
+</body>
+</html>
+
